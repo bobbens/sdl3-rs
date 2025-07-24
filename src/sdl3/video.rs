@@ -18,6 +18,7 @@ use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::{fmt, mem, ptr};
 use sys::properties::{
     SDL_CreateProperties, SDL_DestroyProperties, SDL_SetNumberProperty, SDL_SetStringProperty,
@@ -58,7 +59,7 @@ impl WindowSurfaceRef<'_> {
     #[doc(alias = "SDL_UpdateWindowSurface")]
     pub fn update_window(&self) -> Result<(), Error> {
         unsafe {
-            if sys::video::SDL_UpdateWindowSurface(self.1.context.raw) {
+            if sys::video::SDL_UpdateWindowSurface(self.1.context.raw.load(Ordering::Relaxed)) {
                 Ok(())
             } else {
                 Err(get_error())
@@ -72,7 +73,7 @@ impl WindowSurfaceRef<'_> {
     pub fn update_window_rects(&self, rects: &[Rect]) -> Result<(), Error> {
         unsafe {
             if sys::video::SDL_UpdateWindowSurfaceRects(
-                self.1.context.raw,
+                self.1.context.raw.load(Ordering::Relaxed),
                 Rect::raw_slice(rects),
                 rects.len() as c_int,
             ) {
@@ -544,7 +545,7 @@ impl GLContext {
 /// When the `WindowContext` is dropped, it destroys the `SDL_Window`
 pub struct WindowContext {
     subsystem: VideoSubsystem,
-    raw: *mut sys::video::SDL_Window,
+    raw: AtomicPtr<sys::video::SDL_Window>,
     pub(crate) metal_view: sys::metal::SDL_MetalView,
 }
 
@@ -556,7 +557,7 @@ impl Drop for WindowContext {
             if !self.metal_view.is_null() {
                 sys::metal::SDL_Metal_DestroyView(self.metal_view);
             }
-            sys::video::SDL_DestroyWindow(self.raw)
+            sys::video::SDL_DestroyWindow(self.raw.load(Ordering::Relaxed))
         };
     }
 }
@@ -571,7 +572,7 @@ impl WindowContext {
     ) -> WindowContext {
         WindowContext {
             subsystem: subsystem.clone(),
-            raw,
+            raw: AtomicPtr::new(raw),
             metal_view,
         }
     }
@@ -1604,7 +1605,7 @@ impl Window {
     // https://github.com/rust-lang/rust-clippy/issues/5953 is fixed
     #[allow(clippy::trivially_copy_pass_by_ref)]
     pub fn raw(&self) -> *mut sys::video::SDL_Window {
-        self.context.raw
+        self.context.raw.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -1639,12 +1640,12 @@ impl Window {
 
     #[doc(alias = "SDL_GetWindowID")]
     pub fn id(&self) -> u32 {
-        unsafe { sys::video::SDL_GetWindowID(self.context.raw) }
+        unsafe { sys::video::SDL_GetWindowID(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     #[doc(alias = "SDL_GL_CreateContext")]
     pub fn gl_create_context(&self) -> Result<GLContext, Error> {
-        let result = unsafe { sys::video::SDL_GL_CreateContext(self.context.raw) };
+        let result = unsafe { sys::video::SDL_GL_CreateContext(self.context.raw.load(Ordering::Relaxed)) };
         if result.is_null() {
             Err(get_error())
         } else {
@@ -1670,7 +1671,7 @@ impl Window {
             let context_raw = sys::video::SDL_GL_GetCurrentContext();
 
             if !context_raw.is_null()
-                && sys::video::SDL_GL_MakeCurrent(self.context.raw, context_raw)
+                && sys::video::SDL_GL_MakeCurrent(self.context.raw.load(Ordering::Relaxed), context_raw)
             {
                 Ok(())
             } else {
@@ -1682,7 +1683,7 @@ impl Window {
     #[doc(alias = "SDL_GL_MakeCurrent")]
     pub fn gl_make_current(&self, context: &GLContext) -> Result<(), Error> {
         unsafe {
-            if sys::video::SDL_GL_MakeCurrent(self.context.raw, context.raw) {
+            if sys::video::SDL_GL_MakeCurrent(self.context.raw.load(Ordering::Relaxed), context.raw) {
                 Ok(())
             } else {
                 Err(get_error())
@@ -1692,7 +1693,7 @@ impl Window {
 
     #[doc(alias = "SDL_GL_SwapWindow")]
     pub fn gl_swap_window(&self) {
-        unsafe { sys::video::SDL_GL_SwapWindow(self.context.raw) };
+        unsafe { sys::video::SDL_GL_SwapWindow(self.context.raw.load(Ordering::Relaxed)) };
     }
 
     /// Get the names of the Vulkan instance extensions needed to create a surface with `vulkan_create_surface`.
@@ -1738,7 +1739,7 @@ impl Window {
         #[cfg(not(feature = "ash"))]
         let mut surface: VkSurfaceKHR = 0 as _;
         if unsafe {
-            sys::vulkan::SDL_Vulkan_CreateSurface(self.context.raw, instance, null(), &mut surface)
+            sys::vulkan::SDL_Vulkan_CreateSurface(self.context.raw.load(Ordering::Relaxed), instance, null(), &mut surface)
         } {
             Ok(surface)
         } else {
@@ -1748,7 +1749,7 @@ impl Window {
 
     #[doc(alias = "SDL_GetDisplayForWindow")]
     pub fn get_display(&self) -> Result<Display, Error> {
-        let result = unsafe { sys::video::SDL_GetDisplayForWindow(self.context.raw) };
+        let result = unsafe { sys::video::SDL_GetDisplayForWindow(self.context.raw.load(Ordering::Relaxed)) };
         if result == 0 {
             Err(get_error())
         } else {
@@ -1765,7 +1766,7 @@ impl Window {
 
         unsafe {
             let result = sys::video::SDL_SetWindowFullscreenMode(
-                self.context.raw,
+                self.context.raw.load(Ordering::Relaxed),
                 match display_mode {
                     Some(ref mode) => mode,
                     None => ptr::null(),
@@ -1783,7 +1784,7 @@ impl Window {
     pub fn display_mode(&self) -> Option<DisplayMode> {
         unsafe {
             // returns a pointer to the mode, or NULL if the window will be fullscreen desktop
-            let mode_raw = sys::video::SDL_GetWindowFullscreenMode(self.context.raw);
+            let mode_raw = sys::video::SDL_GetWindowFullscreenMode(self.context.raw.load(Ordering::Relaxed));
             if mode_raw.is_null() {
                 return None;
             }
@@ -1795,7 +1796,7 @@ impl Window {
     pub fn icc_profile(&self) -> Result<Vec<u8>, Error> {
         unsafe {
             let mut size: usize = 0;
-            let data = sys::video::SDL_GetWindowICCProfile(self.context.raw, &mut size as *mut _);
+            let data = sys::video::SDL_GetWindowICCProfile(self.context.raw.load(Ordering::Relaxed), &mut size as *mut _);
             if data.is_null() {
                 return Err(get_error());
             }
@@ -1809,13 +1810,13 @@ impl Window {
     #[doc(alias = "SDL_GetWindowPixelFormat")]
     pub fn window_pixel_format(&self) -> PixelFormat {
         unsafe {
-            PixelFormat::try_from(sys::video::SDL_GetWindowPixelFormat(self.context.raw)).unwrap()
+            PixelFormat::try_from(sys::video::SDL_GetWindowPixelFormat(self.context.raw.load(Ordering::Relaxed))).unwrap()
         }
     }
 
     #[doc(alias = "SDL_GetWindowFlags")]
     pub fn window_flags(&self) -> SDL_WindowFlags {
-        unsafe { sys::video::SDL_GetWindowFlags(self.context.raw) }
+        unsafe { sys::video::SDL_GetWindowFlags(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     /// Does the window have input focus?
@@ -1847,7 +1848,7 @@ impl Window {
     pub fn set_title(&mut self, title: &str) -> Result<(), NulError> {
         let title = CString::new(title)?;
         unsafe {
-            sys::video::SDL_SetWindowTitle(self.context.raw, title.as_ptr() as *const c_char);
+            sys::video::SDL_SetWindowTitle(self.context.raw.load(Ordering::Relaxed), title.as_ptr() as *const c_char);
         }
         Ok(())
     }
@@ -1855,7 +1856,7 @@ impl Window {
     #[doc(alias = "SDL_GetWindowTitle")]
     pub fn title(&self) -> &str {
         unsafe {
-            let buf = sys::video::SDL_GetWindowTitle(self.context.raw);
+            let buf = sys::video::SDL_GetWindowTitle(self.context.raw.load(Ordering::Relaxed));
 
             // The window title must be encoded in UTF-8.
             CStr::from_ptr(buf as *const _).to_str().unwrap()
@@ -1874,7 +1875,7 @@ impl Window {
     /// ```
     #[doc(alias = "SDL_SetWindowIcon")]
     pub fn set_icon<S: AsRef<SurfaceRef>>(&mut self, icon: S) -> bool {
-        unsafe { sys::video::SDL_SetWindowIcon(self.context.raw, icon.as_ref().raw()) }
+        unsafe { sys::video::SDL_SetWindowIcon(self.context.raw.load(Ordering::Relaxed), icon.as_ref().raw()) }
     }
 
     //pub fn SDL_SetWindowData(window: *SDL_Window, name: *c_char, userdata: *c_void) -> *c_void; //TODO: Figure out what this does
@@ -1884,7 +1885,7 @@ impl Window {
     pub fn set_position(&mut self, x: WindowPos, y: WindowPos) -> bool {
         unsafe {
             sys::video::SDL_SetWindowPosition(
-                self.context.raw,
+                self.context.raw.load(Ordering::Relaxed),
                 to_ll_windowpos(x),
                 to_ll_windowpos(y),
             )
@@ -1895,7 +1896,7 @@ impl Window {
     pub fn position(&self) -> (i32, i32) {
         let mut x: c_int = 0;
         let mut y: c_int = 0;
-        unsafe { sys::video::SDL_GetWindowPosition(self.context.raw, &mut x, &mut y) };
+        unsafe { sys::video::SDL_GetWindowPosition(self.context.raw.load(Ordering::Relaxed), &mut x, &mut y) };
         (x as i32, y as i32)
     }
 
@@ -1911,7 +1912,7 @@ impl Window {
         let mut right: c_int = 0;
         let result = unsafe {
             sys::video::SDL_GetWindowBordersSize(
-                self.context.raw,
+                self.context.raw.load(Ordering::Relaxed),
                 &mut top,
                 &mut left,
                 &mut bottom,
@@ -1930,7 +1931,7 @@ impl Window {
         let w = validate_int(width, "width")?;
         let h = validate_int(height, "height")?;
         unsafe {
-            sys::video::SDL_SetWindowSize(self.context.raw, w, h);
+            sys::video::SDL_SetWindowSize(self.context.raw.load(Ordering::Relaxed), w, h);
         }
         Ok(())
     }
@@ -1942,7 +1943,7 @@ impl Window {
     pub fn size(&self) -> (u32, u32) {
         let mut w: c_int = 0;
         let mut h: c_int = 0;
-        unsafe { sys::video::SDL_GetWindowSize(self.context.raw, &mut w, &mut h) };
+        unsafe { sys::video::SDL_GetWindowSize(self.context.raw.load(Ordering::Relaxed), &mut w, &mut h) };
         (w as u32, h as u32)
     }
 
@@ -1958,7 +1959,7 @@ impl Window {
     /// with a different scale setting.
     #[doc(alias = "SDL_GetWindowDisplayScale")]
     pub fn display_scale(&self) -> f32 {
-        unsafe { sys::video::SDL_GetWindowDisplayScale(self.context.raw) }
+        unsafe { sys::video::SDL_GetWindowDisplayScale(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     /// Block until any pending window state is finalized.
@@ -1978,19 +1979,19 @@ impl Window {
     /// This function should only be called on the main thread.
     #[doc(alias = "SDL_SyncWindow")]
     pub fn sync(&self) -> bool {
-        unsafe { sys::video::SDL_SyncWindow(self.context.raw) }
+        unsafe { sys::video::SDL_SyncWindow(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     #[doc(alias = "SDL_GetWindowPixelDensity")]
     pub fn pixel_density(&self) -> f32 {
-        unsafe { sys::video::SDL_GetWindowPixelDensity(self.context.raw) }
+        unsafe { sys::video::SDL_GetWindowPixelDensity(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     #[doc(alias = "SDL_GetWindowSizeInPixels")]
     pub fn size_in_pixels(&self) -> (u32, u32) {
         let mut w: c_int = 0;
         let mut h: c_int = 0;
-        unsafe { sys::video::SDL_GetWindowSizeInPixels(self.context.raw, &mut w, &mut h) };
+        unsafe { sys::video::SDL_GetWindowSizeInPixels(self.context.raw.load(Ordering::Relaxed), &mut w, &mut h) };
         (w as u32, h as u32)
     }
 
@@ -1999,7 +2000,7 @@ impl Window {
         let w = validate_int(width, "width")?;
         let h = validate_int(height, "height")?;
         unsafe {
-            sys::video::SDL_SetWindowMinimumSize(self.context.raw, w, h);
+            sys::video::SDL_SetWindowMinimumSize(self.context.raw.load(Ordering::Relaxed), w, h);
         }
         Ok(())
     }
@@ -2008,7 +2009,7 @@ impl Window {
     pub fn minimum_size(&self) -> (u32, u32) {
         let mut w: c_int = 0;
         let mut h: c_int = 0;
-        unsafe { sys::video::SDL_GetWindowMinimumSize(self.context.raw, &mut w, &mut h) };
+        unsafe { sys::video::SDL_GetWindowMinimumSize(self.context.raw.load(Ordering::Relaxed), &mut w, &mut h) };
         (w as u32, h as u32)
     }
 
@@ -2017,7 +2018,7 @@ impl Window {
         let w = validate_int(width, "width")?;
         let h = validate_int(height, "height")?;
         unsafe {
-            sys::video::SDL_SetWindowMaximumSize(self.context.raw, w, h);
+            sys::video::SDL_SetWindowMaximumSize(self.context.raw.load(Ordering::Relaxed), w, h);
         }
         Ok(())
     }
@@ -2026,43 +2027,43 @@ impl Window {
     pub fn maximum_size(&self) -> (u32, u32) {
         let mut w: c_int = 0;
         let mut h: c_int = 0;
-        unsafe { sys::video::SDL_GetWindowMaximumSize(self.context.raw, &mut w, &mut h) };
+        unsafe { sys::video::SDL_GetWindowMaximumSize(self.context.raw.load(Ordering::Relaxed), &mut w, &mut h) };
         (w as u32, h as u32)
     }
 
     #[doc(alias = "SDL_SetWindowBordered")]
     pub fn set_bordered(&mut self, bordered: bool) -> bool {
-        unsafe { sys::video::SDL_SetWindowBordered(self.context.raw, bordered) }
+        unsafe { sys::video::SDL_SetWindowBordered(self.context.raw.load(Ordering::Relaxed), bordered) }
     }
 
     #[doc(alias = "SDL_ShowWindow")]
     pub fn show(&mut self) -> bool {
-        unsafe { sys::video::SDL_ShowWindow(self.context.raw) }
+        unsafe { sys::video::SDL_ShowWindow(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     #[doc(alias = "SDL_HideWindow")]
     pub fn hide(&mut self) -> bool {
-        unsafe { sys::video::SDL_HideWindow(self.context.raw) }
+        unsafe { sys::video::SDL_HideWindow(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     #[doc(alias = "SDL_RaiseWindow")]
     pub fn raise(&mut self) -> bool {
-        unsafe { sys::video::SDL_RaiseWindow(self.context.raw) }
+        unsafe { sys::video::SDL_RaiseWindow(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     #[doc(alias = "SDL_MaximizeWindow")]
     pub fn maximize(&mut self) -> bool {
-        unsafe { sys::video::SDL_MaximizeWindow(self.context.raw) }
+        unsafe { sys::video::SDL_MaximizeWindow(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     #[doc(alias = "SDL_MinimizeWindow")]
     pub fn minimize(&mut self) -> bool {
-        unsafe { sys::video::SDL_MinimizeWindow(self.context.raw) }
+        unsafe { sys::video::SDL_MinimizeWindow(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     #[doc(alias = "SDL_RestoreWindow")]
     pub fn restore(&mut self) -> bool {
-        unsafe { sys::video::SDL_RestoreWindow(self.context.raw) }
+        unsafe { sys::video::SDL_RestoreWindow(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     pub fn fullscreen_state(&self) -> FullscreenType {
@@ -2072,7 +2073,7 @@ impl Window {
     #[doc(alias = "SDL_SetWindowFullscreen")]
     pub fn set_fullscreen(&mut self, fullscreen: bool) -> Result<(), Error> {
         unsafe {
-            let result = sys::video::SDL_SetWindowFullscreen(self.context.raw, fullscreen);
+            let result = sys::video::SDL_SetWindowFullscreen(self.context.raw.load(Ordering::Relaxed), fullscreen);
             if result {
                 Ok(())
             } else {
@@ -2095,7 +2096,7 @@ impl Window {
     /// possible !
     #[doc(alias = "SDL_GetWindowSurface")]
     pub fn surface<'a>(&'a self, _e: &'a EventPump) -> Result<WindowSurfaceRef<'a>, Error> {
-        let raw = unsafe { sys::video::SDL_GetWindowSurface(self.context.raw) };
+        let raw = unsafe { sys::video::SDL_GetWindowSurface(self.context.raw.load(Ordering::Relaxed)) };
 
         if raw.is_null() {
             Err(get_error())
@@ -2107,22 +2108,22 @@ impl Window {
 
     #[doc(alias = "SDL_SetWindowKeyboardGrab")]
     pub fn set_keyboard_grab(&mut self, grabbed: bool) -> bool {
-        unsafe { sys::video::SDL_SetWindowKeyboardGrab(self.context.raw, grabbed) }
+        unsafe { sys::video::SDL_SetWindowKeyboardGrab(self.context.raw.load(Ordering::Relaxed), grabbed) }
     }
 
     #[doc(alias = "SDL_SetWindowMouseGrab")]
     pub fn set_mouse_grab(&mut self, grabbed: bool) -> bool {
-        unsafe { sys::video::SDL_SetWindowMouseGrab(self.context.raw, grabbed) }
+        unsafe { sys::video::SDL_SetWindowMouseGrab(self.context.raw.load(Ordering::Relaxed), grabbed) }
     }
 
     #[doc(alias = "SDL_GetWindowKeyboardGrab")]
     pub fn keyboard_grab(&self) -> bool {
-        unsafe { sys::video::SDL_GetWindowKeyboardGrab(self.context.raw) }
+        unsafe { sys::video::SDL_GetWindowKeyboardGrab(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     #[doc(alias = "SDL_GetWindowMouseGrab")]
     pub fn mouse_grab(&self) -> bool {
-        unsafe { sys::video::SDL_GetWindowMouseGrab(self.context.raw) }
+        unsafe { sys::video::SDL_GetWindowMouseGrab(self.context.raw.load(Ordering::Relaxed)) }
     }
 
     #[doc(alias = "SDL_SetWindowMouseRect")]
@@ -2137,7 +2138,7 @@ impl Window {
         };
 
         unsafe {
-            if sys::video::SDL_SetWindowMouseRect(self.context.raw, rect_raw_ptr) {
+            if sys::video::SDL_SetWindowMouseRect(self.context.raw.load(Ordering::Relaxed), rect_raw_ptr) {
                 Ok(())
             } else {
                 Err(get_error())
@@ -2148,7 +2149,7 @@ impl Window {
     #[doc(alias = "SDL_GetWindowMouseRect")]
     pub fn mouse_rect(&self) -> Option<Rect> {
         unsafe {
-            let raw_rect = sys::video::SDL_GetWindowMouseRect(self.context.raw);
+            let raw_rect = sys::video::SDL_GetWindowMouseRect(self.context.raw.load(Ordering::Relaxed));
             if raw_rect.is_null() {
                 None
             } else {
@@ -2168,7 +2169,7 @@ impl Window {
     /// This method returns an error if opacity isn't supported by the current platform.
     #[doc(alias = "SDL_SetWindowOpacity")]
     pub fn set_opacity(&mut self, opacity: f32) -> Result<(), Error> {
-        let result = unsafe { sys::video::SDL_SetWindowOpacity(self.context.raw, opacity) };
+        let result = unsafe { sys::video::SDL_SetWindowOpacity(self.context.raw.load(Ordering::Relaxed), opacity) };
         if !result {
             Err(get_error())
         } else {
@@ -2183,7 +2184,7 @@ impl Window {
     /// of an error.
     #[doc(alias = "SDL_GetWindowOpacity")]
     pub fn opacity(&self) -> Result<f32, Error> {
-        let opacity = unsafe { sys::video::SDL_GetWindowOpacity(self.context.raw) };
+        let opacity = unsafe { sys::video::SDL_GetWindowOpacity(self.context.raw.load(Ordering::Relaxed)) };
         if opacity == -1.0f32 {
             Err(get_error())
         } else {
@@ -2194,7 +2195,7 @@ impl Window {
     /// Requests a window to demand attention from the user.
     #[doc(alias = "SDL_FlashWindow")]
     pub fn flash(&mut self, operation: FlashOperation) -> Result<(), Error> {
-        let result = unsafe { sys::video::SDL_FlashWindow(self.context.raw, operation.to_ll()) };
+        let result = unsafe { sys::video::SDL_FlashWindow(self.context.raw.load(Ordering::Relaxed), operation.to_ll()) };
         if result {
             Ok(())
         } else {
