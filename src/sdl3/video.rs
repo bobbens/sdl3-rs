@@ -519,14 +519,16 @@ fn to_ll_windowpos(pos: WindowPos) -> c_int {
 }
 
 pub struct GLContext {
-    raw: sys::video::SDL_GLContext,
+    // We need to wrap it in AtomicPtr so we can't use the alias provided to by sdl3-sys
+    //raw: sys::video::SDL_GLContext,
+    raw: AtomicPtr<sys::video::SDL_GLContextState>,
 }
 
 impl Drop for GLContext {
     #[doc(alias = "SDL_GL_DeleteContext")]
     fn drop(&mut self) {
         unsafe {
-            sys::video::SDL_GL_DestroyContext(self.raw);
+            sys::video::SDL_GL_DestroyContext(self.raw.load(Ordering::Relaxed));
         }
     }
 }
@@ -536,7 +538,7 @@ impl GLContext {
     #[doc(alias = "SDL_GL_GetCurrentContext")]
     pub fn is_current(&self) -> bool {
         let current_raw = unsafe { sys::video::SDL_GL_GetCurrentContext() };
-        self.raw == current_raw
+        self.raw.load(Ordering::Relaxed) == current_raw
     }
 }
 
@@ -694,7 +696,14 @@ impl From<WindowContext> for Window {
     }
 }
 
-impl_raw_accessors!((GLContext, sys::video::SDL_GLContext));
+// Can't use the macro in this case due to AtomicPtr
+//impl_raw_accessors!((GLContext, sys::video::SDL_GLContext));
+impl GLContext {
+    #[inline]
+    pub unsafe fn raw(&self) -> sys::video::SDL_GLContext {
+        self.raw.load(Ordering::Relaxed)
+    }
+}
 
 /// System theme.
 pub enum SystemTheme {
@@ -1649,7 +1658,7 @@ impl Window {
         if result.is_null() {
             Err(get_error())
         } else {
-            Ok(GLContext { raw: result })
+            Ok(GLContext { raw: AtomicPtr::new(result) })
         }
     }
 
@@ -1658,7 +1667,7 @@ impl Window {
         let context_raw = sys::video::SDL_GL_GetCurrentContext();
 
         if !context_raw.is_null() {
-            Some(GLContext { raw: context_raw })
+            Some(GLContext { raw: AtomicPtr::new(context_raw) })
         } else {
             None
         }
@@ -1683,7 +1692,7 @@ impl Window {
     #[doc(alias = "SDL_GL_MakeCurrent")]
     pub fn gl_make_current(&self, context: &GLContext) -> Result<(), Error> {
         unsafe {
-            if sys::video::SDL_GL_MakeCurrent(self.context.raw.load(Ordering::Relaxed), context.raw) {
+            if sys::video::SDL_GL_MakeCurrent(self.context.raw.load(Ordering::Relaxed), context.raw.load(Ordering::Relaxed)) {
                 Ok(())
             } else {
                 Err(get_error())
